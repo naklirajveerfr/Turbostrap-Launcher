@@ -2,14 +2,22 @@ import customtkinter as ctk
 import subprocess
 import threading
 import psutil
+from datetime import datetime, timezone
 import os
 import sys
 import json
+import psutil
 import winreg
 import webbrowser
+import getpass
+
 import urllib.request
+import glob
+import json
 import zipfile
 import tempfile
+import time
+import re
 from pathlib import Path
 from tkinter import messagebox, colorchooser, Canvas
 from PIL import Image, ImageTk
@@ -18,6 +26,12 @@ from io import BytesIO
 import ctypes
 import pystray
 from pystray import MenuItem as TrayItem
+
+try:
+    from pypresence import Presence as _DiscordPresence
+    PYPRESENCE_AVAILABLE = True
+except ImportError:
+    PYPRESENCE_AVAILABLE = False
 
 def open_roblox_folder():
     path = get_roblox_install_path()
@@ -63,18 +77,16 @@ def get_install_size():
     return format_size(get_folder_size(path))
  
  
- 
- 
 def resource_path(relative_path: str) -> str:
     if getattr(sys, "frozen", False):
-        base_path = sys._MEIPASS
+        base_path = os.path.dirname(sys.executable)  # ← only change this line
     else:
         base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
 
 def init_app_icon():
     try:
-        myappid = u"com.capde.turbostraplauncher.1.0"
+        myappid = u"com.turbostrap.bootstrapper.1.3"
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     except Exception:
         pass
@@ -135,8 +147,6 @@ def bootstrap_fonts():
     splash.resizable(False, False)
     splash.overrideredirect(True)
     
-    
-
     W, H = 380, 420
     splash.update_idletasks()
     sw = splash.winfo_screenwidth()
@@ -193,7 +203,7 @@ def bootstrap_fonts():
 
     outer.create_text(cx, logo_cy + 80, text="TurboStrap",
         font=("Consolas", 20, "bold"), fill="#f5f5f5")
-    outer.create_text(cx, logo_cy + 106, text="v1.0.0",
+    outer.create_text(cx, logo_cy + 106, text="v1.3",
         font=("Consolas", 11), fill="#555")
 
     status_var = tk.StringVar(value="Checking fonts...")
@@ -241,12 +251,11 @@ def bootstrap_fonts():
 bootstrap_fonts()
 
 
-
-APP_VERSION = "1.2"
+APP_VERSION = "1.3"
 CONFIG_PATH = Path(os.getenv("APPDATA")) / "TurboStrap" / "config.json"
 CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-VERSION_URL = "https://fr.lowkey.nichesite.org/version.txt"
+VERSION_URL = "https://raw.githubusercontent.com/naklirajveerfr/Turbostrap-Launcher/refs/heads/main/version.txt"
 
 def check_for_update():
     try:
@@ -258,13 +267,15 @@ def check_for_update():
         return None
         
 DEFAULT_CONFIG = {
-    "fps_limit": 144,
+    "fps_limit": 60,
     "fps_unlock": True,
-    "memory_optimise": True,
+    "memory_optimise": False,
     "launch_flags": "",
     "accent_color": "#c41213",
     "roblox_path": "",
     "auto_update": True,
+    "discord_rpc": True,
+    "close_on_launch": False,
 }
 
 def load_config():
@@ -279,6 +290,33 @@ def load_config():
 def save_config(cfg):
     with open(CONFIG_PATH, "w") as f:
         json.dump(cfg, f, indent=2)
+
+# ── Playtime tracker ──────────────────────────────────────────────────────────
+PLAYTIME_PATH = Path(os.getenv("APPDATA")) / "TurboStrap" / "playtime.json"
+
+def load_playtime():
+    if PLAYTIME_PATH.exists():
+        try:
+            with open(PLAYTIME_PATH) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"total_seconds": 0}
+
+def save_playtime(data):
+    try:
+        with open(PLAYTIME_PATH, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+def format_playtime(total_seconds):
+    h = int(total_seconds // 3600)
+    m = int((total_seconds % 3600) // 60)
+    if h > 0:
+        return f"{h}h {m}m"
+    return f"{m}m"
+# ── end playtime ──────────────────────────────────────────────────────────────
 
 
 TS_RBLX_BASE    = Path(os.getenv("LOCALAPPDATA")) / "TurboStrap" / "RblxVersions"
@@ -366,7 +404,6 @@ def download_roblox(version_hash, progress_cb=None, status_cb=None):
     dest_dir = TS_RBLX_BASE / version_hash
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-
     manifest_url = f"{CDN_BASE}/{version_hash}-rbxPkgManifest.txt"
     if status_cb:
         status_cb(f"Fetching manifest for {version_hash}...")
@@ -386,7 +423,6 @@ def download_roblox(version_hash, progress_cb=None, status_cb=None):
 
     if status_cb:
         status_cb(f"Found {len(packages)} packages to download")
-
 
     total = len(packages)
     for i, pkg in enumerate(packages):
@@ -422,7 +458,6 @@ def download_roblox(version_hash, progress_cb=None, status_cb=None):
                 status_cb(f"✗ Download failed ({pkg}): {e}")
             continue
 
-
         subfolder = PACKAGE_DIRS.get(pkg, "")
         extract_to = (dest_dir / subfolder) if subfolder else dest_dir
         extract_to.mkdir(parents=True, exist_ok=True)
@@ -441,7 +476,6 @@ def download_roblox(version_hash, progress_cb=None, status_cb=None):
                 zip_path.unlink(missing_ok=True)
             continue
 
-
     app_settings = dest_dir / "AppSettings.xml"
     if not app_settings.exists():
         app_settings.write_text(
@@ -453,7 +487,6 @@ def download_roblox(version_hash, progress_cb=None, status_cb=None):
         )
         if status_cb:
             status_cb("✓ Wrote AppSettings.xml")
-
 
     exe_path = dest_dir / "RobloxPlayerBeta.exe"
     if not exe_path.exists():
@@ -467,7 +500,6 @@ def download_roblox(version_hash, progress_cb=None, status_cb=None):
     if status_cb:
         status_cb(f"✓ RobloxPlayerBeta.exe  ({exe_path.stat().st_size:,} bytes)")
 
-
     TS_VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
     TS_VERSION_FILE.write_text(version_hash)
 
@@ -478,23 +510,100 @@ def download_roblox(version_hash, progress_cb=None, status_cb=None):
     return True
 
 
+DISCORD_CLIENT_ID = "1507357307552403597"
 
+class DiscordRPCManager:
+    
+    _LOG_DIRS = [
+        Path(os.getenv("LOCALAPPDATA", "")) / "Roblox" / "logs",
+        TS_RBLX_BASE,  
+    ]
+
+    def __init__(self):
+        self._rpc = None
+        self._connected = False
+        self._stop_evt = threading.Event()
+        self._start_ts = None
+        self._last_place = None
+        self._log_path = None   
+        self._log_pos  = 0      
+
+    def start(self):
+        if not PYPRESENCE_AVAILABLE: return
+        threading.Thread(target=self._connect_and_run, daemon=True).start()
+
+    def stop(self):
+        self._stop_evt.set()
+        self._connected = False
+        if self._rpc:
+            try: self._rpc.close()
+            except: pass
+            self._rpc = None
+
+    def _connect_and_run(self):
+        try:
+            self._rpc = _DiscordPresence(DISCORD_CLIENT_ID)
+            self._rpc.connect()
+            self._connected = True
+            self._start_ts = int(datetime.now(timezone.utc).timestamp())
+            self._set_presence(game_name=None)
+        except:
+            self._connected = False
+            return
+        self._stop_evt.clear()
+        self._monitor()
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _is_roblox_running(self):
+        for proc in psutil.process_iter(['name']):
+            try:
+                if proc.info['name'] == 'RobloxPlayerBeta.exe':
+                    return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        return False
+
+    def _set_presence(self, game_name=None):
+        if not self._connected or not self._rpc: return
+        try:
+            self._rpc.update(
+                details="Playing Roblox",
+                state="On TurboStrap",
+                large_image="turbostrap",
+                start=self._start_ts)
+        except:
+            pass
+
+    # ── main loop ────────────────────────────────────────────────────────────
+
+    def _monitor(self):
+        """Keep presence alive while Roblox is running."""
+        while not self._stop_evt.wait(5):
+            if not self._connected:
+                break
+            if not self._is_roblox_running():
+                self._set_presence(game_name=None)
+                break
+
+_discord_rpc = DiscordRPCManager()
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-BG      = "#050505"
-CARD_BG = "#0a0a0a"
-BORDER  = "#1a1a1a"
-TEXT    = "#e0e0e0"
-MUTED   = "#999999"
-ACCENT  = "#c41213"
-
-
+# ── Glassmorphism palette ─────────────────────────────────────────────────────
+BG             = "#000000" 
+CARD_BG        = "#050505" 
+CARD_BG2       = "#0a0a0a"  
+BORDER         = "#111111" 
+BORDER2        = "#000000"  
+TEXT           = "#f5f5f5" 
+MUTED          = "#2e2e2e"
+ACCENT         = "#c41213" 
+GLASS_SIDEBAR  = "#000000"  
+PILL_BG        = "#080808"  
 FFLAGS_LEGACY_FRM_QUALITY_LABELS = frozenset({
     "Voxel (Level 21)", "ShadowMap (Level 20)", "Future (Level 19)",
 })
-
-
 
 FFLAG_CATEGORIES = {
     "Rendering": {
@@ -704,8 +813,6 @@ FFLAG_CATEGORIES = {
     }
 }
 
-
-
 FFLAGS_PATH = Path(os.getenv("APPDATA")) / "TurboStrap" / "fflags.json"
 
 def load_fflags():
@@ -786,98 +893,160 @@ def lbl(parent, text, font=("Barlow", 13), color=TEXT, **kw):
     return ctk.CTkLabel(parent, text=text, font=font, text_color=color, **kw)
 
 def btn(parent, text, cmd, font=("Barlow SemiBold", 13), **kw):
-    kw.setdefault("corner_radius", 6)
+    kw.setdefault("corner_radius", 10)
+    kw.setdefault("border_width", 1)
+    kw.setdefault("border_color", BORDER2)
     return ctk.CTkButton(parent, text=text, command=cmd, font=font, **kw)
 
-def _darken(hex_color, factor=0.75):
-    hex_color = hex_color.lstrip("#")
-    r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
-    r, g, b = int(r * factor), int(g * factor), int(b * factor)
-    return f"#{r:02x}{g:02x}{b:02x}"
+def glass_card(parent, **kw):
+    kw.setdefault("fg_color", CARD_BG)
+    kw.setdefault("corner_radius", 14)
+    kw.setdefault("border_width", 1)
+    kw.setdefault("border_color", BORDER)
+    return ctk.CTkFrame(parent, **kw)
 
 def _darken(hex_color, factor=0.75):
     hex_color = hex_color.lstrip("#")
     r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
     r, g, b = int(r * factor), int(g * factor), int(b * factor)
     return f"#{r:02x}{g:02x}{b:02x}"
-    
     
 class LaunchPage(ctk.CTkFrame):
     def __init__(self, parent, cfg):
-        super().__init__(parent, fg_color="transparent", corner_radius=0)
+        super().__init__(parent, fg_color="#030303", corner_radius=0)
         self.cfg = cfg
 
-        title_frame = ctk.CTkFrame(self, fg_color="transparent")
-        title_frame.pack(anchor="w", padx=30, pady=(28, 0))
-        lbl(title_frame, "LAUNCH ", font=("Bebas Neue", 42), color=TEXT).pack(side="left")
-        lbl(title_frame, "ROBLOX", font=("Bebas Neue", 42), color=ACCENT).pack(side="left")
+        # ── Top hero strip ────────────────────────────────────────────────────
+        hero = ctk.CTkFrame(self, fg_color="#030303", corner_radius=0,
+            border_width=0)
+        hero.pack(fill="x")
 
-        lbl(self, "All systems optimised. Ready to go.",
-            font=("Barlow", 12), color=MUTED).pack(anchor="w", padx=30, pady=(4, 20))
+        # red accent line at very top
+        ctk.CTkFrame(hero, fg_color=ACCENT, height=3, corner_radius=0).pack(fill="x")
 
-        cards_row = ctk.CTkFrame(self, fg_color="transparent")
-        cards_row.pack(fill="x", padx=30, pady=(0, 16))
-        cards_row.columnconfigure((0, 1, 2), weight=1, uniform="col")
+        hero_inner = ctk.CTkFrame(hero, fg_color="transparent")
+        hero_inner.pack(fill="x", padx=28, pady=(18, 16))
 
-        fps_card = ctk.CTkFrame(cards_row, fg_color=CARD_BG, corner_radius=6,
-            border_width=1, border_color=BORDER)
-        fps_card.grid(row=0, column=0, padx=(0, 6), sticky="nsew")
-        lbl(fps_card, "FPS UNLOCK", font=("Barlow", 10), color=MUTED).pack(anchor="w", padx=14, pady=(12, 2))
+        title_row = ctk.CTkFrame(hero_inner, fg_color="transparent")
+        title_row.pack(anchor="w")
+        lbl(title_row, "TURBOSTRAP", font=("Bebas Neue", 13), color=ACCENT).pack(side="left")
+        lbl(title_row, "  ·  ROBLOX BOOTSTRAPPER", font=("Bebas Neue", 13), color="#444").pack(side="left")
+
+        lbl(hero_inner, "LAUNCH ROBLOX",
+            font=("Bebas Neue", 48), color="#ffffff").pack(anchor="w", pady=(2, 0))
+        lbl(hero_inner, "All systems optimised. Ready to go.",
+            font=("Barlow", 12), color="#555").pack(anchor="w")
+
+        # ── Stat strip ────────────────────────────────────────────────────────
+        stat_strip = ctk.CTkFrame(self, fg_color="#030303", corner_radius=0)
+        stat_strip.pack(fill="x")
+        ctk.CTkFrame(stat_strip, fg_color="#1a1a1a", height=1, corner_radius=0).pack(fill="x")
+
+        stats_inner = ctk.CTkFrame(stat_strip, fg_color="transparent")
+        stats_inner.pack(fill="x", padx=28, pady=14)
+        stats_inner.columnconfigure((0, 1, 2, 3), weight=1, uniform="stat")
+
+        def stat_pill(parent, col, icon, label, value, color):
+            f = ctk.CTkFrame(parent, fg_color="#0d0d0d", corner_radius=8,
+                border_width=1, border_color="#1e1e1e")
+            f.grid(row=0, column=col, padx=(0 if col == 0 else 8, 0), sticky="nsew")
+            top = ctk.CTkFrame(f, fg_color="transparent")
+            top.pack(fill="x", padx=14, pady=(12, 4))
+            lbl(top, icon, font=("Barlow", 11), color=color).pack(side="left")
+            lbl(top, f"  {label}", font=("Barlow", 9), color="#444").pack(side="left")
+            val_lbl = lbl(f, value, font=("Bebas Neue", 19), color=color)
+            val_lbl.pack(anchor="w", padx=14, pady=(0, 12))
+            return val_lbl
+
         fps_val   = "ENABLED"  if cfg.get("fps_unlock", True) else "DISABLED"
         fps_color = "#00c850"  if cfg.get("fps_unlock", True) else "#ff4444"
-        self.fps_status_lbl = lbl(fps_card, fps_val, font=("Bebas Neue", 22), color=fps_color)
-        self.fps_status_lbl.pack(anchor="w", padx=14, pady=(0, 12))
+        self.fps_status_lbl = stat_pill(stats_inner, 0, "◈", "FPS UNLOCK", fps_val, fps_color)
 
-        mem_card = ctk.CTkFrame(cards_row, fg_color=CARD_BG, corner_radius=6,
-            border_width=1, border_color=BORDER)
-        mem_card.grid(row=0, column=1, padx=6, sticky="nsew")
-        lbl(mem_card, "MEMORY OPT", font=("Barlow", 10), color=MUTED).pack(anchor="w", padx=14, pady=(12, 2))
-        mem_val   = "READY"   if cfg.get("memory_optimise", True) else "OFF"
-        mem_color = "#ff9500" if cfg.get("memory_optimise", True) else MUTED
-        self.mem_status_lbl = lbl(mem_card, mem_val, font=("Bebas Neue", 22), color=mem_color)
-        self.mem_status_lbl.pack(anchor="w", padx=14, pady=(0, 12))
+        mem_val   = "ACTIVE" if cfg.get("memory_optimise", True) else "OFF"
+        mem_color = "#ff6b00" if cfg.get("memory_optimise", True) else "#444"
+        self.mem_status_lbl = stat_pill(stats_inner, 1, "◈", "MEMORY OPT", mem_val, mem_color)
 
-        ver_card = ctk.CTkFrame(cards_row, fg_color=CARD_BG, corner_radius=6,
-            border_width=1, border_color=BORDER)
-        ver_card.grid(row=0, column=2, padx=(6, 0), sticky="nsew")
-        lbl(ver_card, "ROBLOX BUILD", font=("Barlow", 10), color=MUTED).pack(anchor="w", padx=14, pady=(12, 2))
         installed = get_installed_version()
-        ver_short = installed[-8:].upper() if installed else "NONE"
-        self.ver_status_lbl = lbl(ver_card, ver_short, font=("Bebas Neue", 22), color=TEXT)
-        self.ver_status_lbl.pack(anchor="w", padx=14, pady=(0, 12))
+        ver_short = installed[-8:].upper() if installed else "NOT INSTALLED"
+        self.ver_status_lbl = stat_pill(stats_inner, 2, "◈", "ROBLOX BUILD", ver_short, "#888")
 
-        self.progress_frame = ctk.CTkFrame(self, fg_color=CARD_BG, corner_radius=6,
-            border_width=1, border_color=BORDER)
+        pt_data   = load_playtime()
+        self.playtime_lbl = stat_pill(stats_inner, 3, "◈", "PLAYTIME",
+            format_playtime(pt_data.get("total_seconds", 0)), "#c084fc")
+
+        ctk.CTkFrame(stat_strip, fg_color="#1a1a1a", height=1, corner_radius=0).pack(fill="x")
+
+        # ── Progress bar (hidden until needed) ───────────────────────────────
+        self.progress_frame = ctk.CTkFrame(self, fg_color="#111111", corner_radius=0,
+            border_width=0)
         self.progress_label = lbl(self.progress_frame, "Checking for updates...",
-            font=("Barlow", 11), color=MUTED)
-        self.progress_label.pack(anchor="w", padx=16, pady=(12, 4))
+            font=("Barlow", 11), color="#555")
+        self.progress_label.pack(anchor="w", padx=28, pady=(10, 4))
         self.progress_bar = ctk.CTkProgressBar(self.progress_frame,
-            fg_color=BORDER, progress_color=ACCENT, height=6, corner_radius=3)
+            fg_color="#1a1a1a", progress_color=ACCENT, height=2, corner_radius=0)
         self.progress_bar.set(0)
-        self.progress_bar.pack(fill="x", padx=16, pady=(0, 12))
+        self.progress_bar.pack(fill="x", padx=0, pady=(0, 0))
+        ctk.CTkFrame(self.progress_frame, fg_color="#1a1a1a",
+            height=1, corner_radius=0).pack(fill="x")
 
-        lbl(self, "CONSOLE", font=("Barlow SemiBold", 11), color=MUTED).pack(
-            anchor="w", padx=30, pady=(0, 6))
+        # ── Console ───────────────────────────────────────────────────────────
+        console_header = ctk.CTkFrame(self, fg_color="transparent")
+        console_header.pack(fill="x", padx=28, pady=(16, 6))
+        lbl(console_header, "CONSOLE OUTPUT", font=("Barlow SemiBold", 10), color="#333").pack(side="left")
 
-        self.console = ctk.CTkTextbox(self, fg_color=CARD_BG, corner_radius=6,
-            border_width=1, border_color=BORDER,
-            font=("Consolas", 11), text_color=MUTED, state="disabled")
-        self.console.pack(fill="both", expand=True, padx=30, pady=(0, 16))
+        self.console = ctk.CTkTextbox(self, fg_color="#030303", corner_radius=0,
+            border_width=1, border_color="#1a1a1a",
+            font=("Consolas", 11), text_color="#555", state="disabled")
+        self.console.pack(fill="both", expand=True, padx=28, pady=(0, 20))
 
-        self.launch_btn = btn(self, "▶  LAUNCH ROBLOX", self._on_launch_click,
-            font=("Bebas Neue", 22), height=54,
-            fg_color=ACCENT, hover_color=_darken(ACCENT))
-        self.launch_btn.pack(fill="x", padx=30, pady=(0, 2))
+        # ── Bottom action bar ─────────────────────────────────────────────────
+        bottom = ctk.CTkFrame(self, fg_color="#030303", corner_radius=0)
+        bottom.pack(fill="x")
+        ctk.CTkFrame(bottom, fg_color="#1a1a1a", height=1, corner_radius=0).pack(fill="x")
 
-        btn(self, "🗑  WIPE & REDOWNLOAD", self._wipe_and_redownload,
-            font=("Barlow SemiBold", 11), height=28,
-            fg_color="#222", hover_color="#333").pack(fill="x", padx=30, pady=(0, 2))
+        bottom_inner = ctk.CTkFrame(bottom, fg_color="transparent")
+        bottom_inner.pack(fill="x", padx=28, pady=16)
+        bottom_inner.columnconfigure(0, weight=1)
 
-        btn(self, "OPEN ROBLOX.COM", lambda: webbrowser.open("https://www.roblox.com"),
-            font=("Barlow SemiBold", 12), height=32,
-            fg_color=CARD_BG, hover_color=BORDER).pack(fill="x", padx=30, pady=(0, 20))
+        self.launch_btn = ctk.CTkButton(
+            bottom_inner,
+            text="▶   LAUNCH ROBLOX",
+            command=self._on_launch_click,
+            font=("Bebas Neue", 24),
+            height=56,
+            fg_color=ACCENT,
+            hover_color=_darken(ACCENT),
+            corner_radius=6,
+            border_width=0,
+            text_color="#ffffff",
+        )
+        self.launch_btn.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+
+        sub_row = ctk.CTkFrame(bottom_inner, fg_color="transparent")
+        sub_row.grid(row=1, column=0, sticky="ew")
+        sub_row.columnconfigure((0, 1), weight=1, uniform="sub")
+
+        def ghost_btn(parent, col, text, cmd):
+            return ctk.CTkButton(
+                parent, text=text, command=cmd,
+                font=("Barlow SemiBold", 11), height=34,
+                fg_color="transparent", hover_color="#1a1a1a",
+                text_color="#444", corner_radius=6,
+                border_width=1, border_color="#1e1e1e",
+            )
+
+        ghost_btn(sub_row, 0, "🗑  Wipe & Redownload",
+            self._wipe_and_redownload).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ghost_btn(sub_row, 1, "🌐  Open Roblox.com",
+            lambda: webbrowser.open("https://www.roblox.com")).grid(
+            row=0, column=1, sticky="ew", padx=(6, 0))
 
         self.refresh()
+
+    def refresh_playtime(self, extra_seconds=0):
+        pt = load_playtime()
+        total = pt.get("total_seconds", 0) + extra_seconds
+        self.playtime_lbl.configure(text=format_playtime(total))
 
     def _log(self, msg):
         self.console.configure(state="normal")
@@ -895,7 +1064,7 @@ class LaunchPage(ctk.CTkFrame):
     def _show_progress(self, show=True):
         def _update():
             if show:
-                self.progress_frame.pack(fill="x", padx=30, pady=(0, 10), before=self.console)
+                self.progress_frame.pack(fill="x", before=self.console)
             else:
                 self.progress_frame.pack_forget()
         self.after(0, _update)
@@ -1024,7 +1193,29 @@ class LaunchPage(ctk.CTkFrame):
         self.after(0, lambda: self.launch_btn.configure(text="LAUNCHING..."))
 
         try:
-            apply_fflags_to_roblox(load_raw_fflags())
+            raw_flags = load_raw_fflags()
+            
+            raw_flags["FLogAll"] = 7
+            apply_fflags_to_roblox(raw_flags)
+
+            # ─── DISCORD RPC CONFIGURATION GATING ───
+            app_config = None
+            node = self
+            while node is not None:
+                if hasattr(node, 'cfg'):
+                    app_config = node.cfg
+                    break
+                node = getattr(node, "master", None)
+
+            if app_config is None:
+                try:
+                    app_config = load_config()
+                except Exception:
+                    app_config = {}
+
+            if app_config.get("discord_rpc", True):
+                _discord_rpc.start()
+            # ──────────────────────────────────────────────────
 
             proc = subprocess.Popen(
                 [roblox, ROBLOX_LAUNCH_URI],
@@ -1038,90 +1229,113 @@ class LaunchPage(ctk.CTkFrame):
                     break
                 root = getattr(root, "master", None)
         except Exception as e:
-            self.after(0, lambda: messagebox.showerror("Launch Error", str(e)))
-            self.after(0, lambda: self._log(f"✗ Launch failed: {e}"))
+           
+            self.after(0, lambda err=e: self._log(f"✗ Launch failed: {err}"))
         finally:
             self.after(0, lambda: self.launch_btn.configure(
                 state="normal", text="▶  LAUNCH ROBLOX"))
 
-
-
-
 class SettingsPage(ctk.CTkFrame):
-
     def __init__(self, parent, cfg, refresh_cb):
         super().__init__(parent, fg_color="transparent", corner_radius=0)
-
         self.cfg = cfg
         self.refresh_cb = refresh_cb
 
         scroll = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0)
-        scroll.pack(fill="both", expand=True, padx=20, pady=20)
+        scroll.pack(fill="both", expand=True, padx=24, pady=24)
 
-        lbl(scroll, "Settings", font=("Bebas Neue", 28)).pack(anchor="w", pady=(0, 20))
+        lbl(scroll, "Settings", font=("Bebas Neue", 32)).pack(anchor="w", pady=(0, 18))
 
-        
-        card1 = ctk.CTkFrame(
-            scroll,
-            fg_color=CARD_BG,
-            corner_radius=8,
-            border_width=1,
-            border_color=BORDER
-        )
-        card1.pack(fill="x", pady=10)
+        def section(parent, title, accent_color=ACCENT):
+            c = glass_card(parent)
+            c.pack(fill="x", pady=8)
+            top = ctk.CTkFrame(c, fg_color=accent_color, height=2, corner_radius=0)
+            top.pack(fill="x")
+            lbl(c, title, font=("Barlow SemiBold", 15)).pack(anchor="w", padx=18, pady=(14, 8))
+            return c
 
-        lbl(card1, "Performance", font=("Barlow SemiBold", 16)).pack(
-            anchor="w", padx=20, pady=(15, 10)
-        )
+        def switch(parent, text, var):
+            ctk.CTkSwitch(parent, text=text, variable=var,
+                onvalue=True, offvalue=False,
+                progress_color=ACCENT, button_color=TEXT,
+                fg_color=BORDER2, font=("Barlow", 13),
+            ).pack(anchor="w", padx=18, pady=(0, 6))
 
+        def divider(parent):
+            ctk.CTkFrame(parent, fg_color=BORDER, height=1).pack(
+                fill="x", padx=18, pady=4)
+
+        # ── Performance ───────────────────────────────────────────────────────
+        card1 = section(scroll, "⚡  Performance", "#ff9500")
         self.fps_unlock_var = ctk.BooleanVar(value=cfg.get("fps_unlock", True))
-        ctk.CTkSwitch(
-            card1,
-            text="Unlock FPS Cap",
-            variable=self.fps_unlock_var,
-            onvalue=True,
-            offvalue=False,
-            progress_color=ACCENT,
-            button_color=TEXT,
-            fg_color=BORDER,
-            font=("Barlow", 13)
-        ).pack(anchor="w", padx=20, pady=5)
-
+        switch(card1, "Unlock FPS Cap", self.fps_unlock_var)
+        divider(card1)
         self.mem_opt_var = ctk.BooleanVar(value=cfg.get("memory_optimise", True))
-        ctk.CTkSwitch(
-            card1,
-            text="Memory Optimization",
-            variable=self.mem_opt_var,
-            onvalue=True,
-            offvalue=False,
-            progress_color=ACCENT,
-            button_color=TEXT,
-            fg_color=BORDER,
-            font=("Barlow", 13)
-        ).pack(anchor="w", padx=20, pady=(5, 15))
+        switch(card1, "Memory Optimization", self.mem_opt_var)
+        ctk.CTkFrame(card1, fg_color="transparent", height=8).pack()
 
-        btn(
-            scroll,
-            "📂 Open Roblox Folder",
-            open_roblox_folder,
-            width=200,
-            fg_color=ACCENT,
-           hover_color=_darken(ACCENT)
-        ).pack(pady=10)
+        # ── Discord ───────────────────────────────────────────────────────────
+        card_rpc = section(scroll, "💬  Discord", "#5865f2")
+        lbl(card_rpc, "Show your activity on your Discord profile.",
+            font=("Barlow", 11), color=MUTED).pack(anchor="w", padx=18, pady=(0, 8))
+        self.discord_rpc_var = ctk.BooleanVar(value=cfg.get("discord_rpc", True))
+        ctk.CTkSwitch(card_rpc, text="Enable Rich Presence",
+            variable=self.discord_rpc_var,
+            onvalue=True, offvalue=False,
+            progress_color="#5865f2", button_color=TEXT,
+            fg_color=BORDER2, font=("Barlow", 13),
+            command=self._on_discord_rpc_toggle,
+        ).pack(anchor="w", padx=18, pady=(0, 6))
+        warn_text = ("⚠  pypresence not installed — run: pip install pypresence"
+                     if not PYPRESENCE_AVAILABLE
+                     else "Requires Discord to be open. Takes effect on next launch.")
+        warn_color = "#f59e0b" if not PYPRESENCE_AVAILABLE else MUTED
+        lbl(card_rpc, warn_text, font=("Barlow", 11), color=warn_color).pack(
+            anchor="w", padx=18, pady=(0, 14))
 
-       
-        self.install_size_lbl = lbl(
-            scroll,
-            f"Install Size: {get_install_size()}",
-            font=("Barlow", 12),
-            color="white"
-        )
-        self.install_size_lbl.pack(anchor="w", padx=315, pady=0)
+        # ── Behaviour ─────────────────────────────────────────────────────────
+        card_beh = section(scroll, "🔧  Behaviour", MUTED)
+        self.close_on_launch_var = ctk.BooleanVar(value=cfg.get("close_on_launch", False))
+        switch(card_beh, "Close TurboStrap when Roblox exits", self.close_on_launch_var)
+        lbl(card_beh, "When off, TurboStrap stays in the system tray.",
+            font=("Barlow", 11), color=MUTED).pack(anchor="w", padx=18, pady=(0, 14))
 
+        # ── Actions ───────────────────────────────────────────────────────────
+        card_act = section(scroll, "🗂  Actions", MUTED)
+        act_row = ctk.CTkFrame(card_act, fg_color="transparent")
+        act_row.pack(fill="x", padx=18, pady=(0, 14))
+        act_row.columnconfigure((0, 1), weight=1, uniform="act")
+        btn(act_row, "📂  Open Roblox Folder", open_roblox_folder,
+            font=("Barlow SemiBold", 12), height=36,
+            fg_color=CARD_BG2, hover_color=BORDER2,
+            border_color=BORDER, corner_radius=10,
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.install_size_lbl = lbl(act_row,
+            f"Install size: {get_install_size()}",
+            font=("Barlow", 11), color=MUTED)
+        self.install_size_lbl.grid(row=0, column=1, sticky="w", padx=(8, 0))
+
+        # ── Save ──────────────────────────────────────────────────────────────
+        btn(scroll, "💾  Save Settings", self._save,
+            font=("Barlow SemiBold", 14), height=44,
+            fg_color=ACCENT, hover_color=_darken(ACCENT),
+            border_color=_darken(ACCENT, 0.6), corner_radius=12,
+        ).pack(fill="x", pady=(8, 4))
+
+    def _on_discord_rpc_toggle(self):
+        """Instantly starts or stops the Discord presence based on the UI switch toggle."""
+        is_enabled = self.discord_rpc_var.get()
+        if is_enabled:
+            _discord_rpc.start()
+        else:
+            _discord_rpc.stop()
+        self.cfg["discord_rpc"] = is_enabled
 
     def _save(self):
-        self.cfg["fps_unlock"] = self.fps_unlock_var.get()
+        self.cfg["fps_unlock"]      = self.fps_unlock_var.get()
         self.cfg["memory_optimise"] = self.mem_opt_var.get()
+        self.cfg["discord_rpc"]     = self.discord_rpc_var.get()
+        self.cfg["close_on_launch"] = self.close_on_launch_var.get()
         save_config(self.cfg)
         messagebox.showinfo("TurboStrap", "Settings saved!")
         self.refresh_cb()
@@ -1129,15 +1343,36 @@ class SettingsPage(ctk.CTkFrame):
 class LogsPage(ctk.CTkFrame):
     def __init__(self, parent):
         super().__init__(parent, fg_color="transparent", corner_radius=0)
+        
+        # UI Setup
         lbl(self, "Logs", font=("Bebas Neue", 28)).pack(anchor="w", padx=20, pady=20)
         self.log_box = ctk.CTkTextbox(self, fg_color=CARD_BG, corner_radius=8,
-            border_width=1, border_color=BORDER, font=("Consolas", 11))
+                                     border_width=1, border_color=BORDER, font=("Consolas", 11))
         self.log_box.pack(fill="both", expand=True, padx=20, pady=(0, 20))
-        self.log_box.insert("1.0", "TurboStrap Logs\n" + "=" * 50 + "\n\n")
-        self.log_box.insert("end", "✓ Launcher initialized\n")
-        self.log_box.insert("end", "✓ Configuration loaded\n")
-        self.log_box.insert("end", "✓ FFlags system ready\n")
+        
+        # Load the logs
+        self.load_latest_roblox_log()
 
+    def load_latest_roblox_log(self):
+        log_dir = Path(os.getenv('LOCALAPPDATA')) / "Roblox" / "logs"
+        
+        # Get all log files in the directory
+        list_of_files = glob.glob(str(log_dir / "*.log"))
+        
+        if not list_of_files:
+            self.log_box.insert("end", "No Roblox logs found.")
+            return
+
+        # Find the most recently modified file
+        latest_file = max(list_of_files, key=os.path.getmtime)
+        
+        try:
+            with open(latest_file, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+                self.log_box.delete("1.0", "end") # Clear placeholder
+                self.log_box.insert("1.0", content)
+        except Exception as e:
+            self.log_box.insert("end", f"\nError reading log file: {e}")
 
 class AboutPage(ctk.CTkFrame):
     def __init__(self, parent):
@@ -1147,7 +1382,8 @@ class AboutPage(ctk.CTkFrame):
         card.pack(pady=40, padx=40, fill="both", expand=True)
         lbl(card, "TurboStrap", font=("Bebas Neue", 36)).pack(pady=(40, 10))
         lbl(card, f"Version {APP_VERSION}", font=("Barlow", 14), color=MUTED).pack()
-        lbl(card, "Enhanced Roblox Launcher", font=("Barlow", 13), color=MUTED).pack(pady=(5, 30))
+        lbl(card, "Roblox Bootstrapper made in Python", font=("Barlow", 13), color=MUTED).pack(pady=(5, 30))
+        lbl(card, "A project made by Rajveer Singh. Made entirely in python.", font=("Barlow", 13), color=MUTED).pack(pady=(5, 30))
         lbl(card, "Features:", font=("Barlow SemiBold", 15)).pack(pady=(20, 10))
         for feat in [
             "✓ FPS Unlock & Performance Optimization",
@@ -1157,6 +1393,7 @@ class AboutPage(ctk.CTkFrame):
             "✓ Minimize to Tray"
         ]:
             lbl(card, feat, font=("Barlow", 12), color=TEXT).pack(pady=2)
+
 class ThemePage(ctk.CTkFrame):
     def __init__(self, parent, cfg, refresh_cb):
         super().__init__(parent, fg_color="transparent", corner_radius=0)
@@ -1173,7 +1410,6 @@ class ThemePage(ctk.CTkFrame):
         lbl(scroll, "Customise the look of TurboStrap.",
             font=("Barlow", 12), color=MUTED).pack(anchor="w", pady=(0, 20))
 
-    
         accent_card = ctk.CTkFrame(scroll, fg_color=CARD_BG, corner_radius=8,
             border_width=1, border_color=BORDER)
         accent_card.pack(fill="x", pady=10)
@@ -1210,7 +1446,6 @@ class ThemePage(ctk.CTkFrame):
         btn(btn_row, "↺  Reset to Default", self._reset_accent,
             width=160, fg_color="#333", hover_color="#444").pack(side="left")
 
-    
         presets_card = ctk.CTkFrame(scroll, fg_color=CARD_BG, corner_radius=8,
             border_width=1, border_color=BORDER)
         presets_card.pack(fill="x", pady=10)
@@ -1246,7 +1481,6 @@ class ThemePage(ctk.CTkFrame):
             swatch.bind("<Button-1>", lambda e, c=color: self._apply_accent(c))
             lbl(cell, name, font=("Barlow", 10), color=MUTED).pack(pady=(4, 0))
 
-      
         save_card = ctk.CTkFrame(scroll, fg_color=CARD_BG, corner_radius=8,
             border_width=1, border_color=BORDER)
         save_card.pack(fill="x", pady=10)
@@ -1281,32 +1515,113 @@ class ThemePage(ctk.CTkFrame):
         messagebox.showinfo("TurboStrap", "Theme applied!")
         self.refresh_cb()
 
+def save_user(username):
+    data = {"username": username}
+    with open("config.json", "w") as f:
+        json.dump(data, f)
+
+def get_saved_username():
+    if not os.path.exists("config.json"):
+        return "Set Username"
+    try:
+        with open("config.json", "r") as f:
+            return json.load(f).get("username", "Guest")
+    except:
+        return "Set Username"
+
 class Sidebar(ctk.CTkFrame):
     def __init__(self, parent, nav_cb):
-        super().__init__(parent, fg_color=BG, corner_radius=0, width=220)
+        super().__init__(parent, fg_color=GLASS_SIDEBAR, corner_radius=0, width=210)
         self.nav_cb = nav_cb
+        self._buttons = {}
+        self._active = None
+        
+# Logo/Header Area
         logo_frame = ctk.CTkFrame(self, fg_color="transparent")
-        logo_frame.pack(fill="x", pady=(20, 10))
-        lbl(logo_frame, "TurboStrap", font=("Barlow SemiBold", 14)).pack()
+        logo_frame.pack(fill="x", padx=18, pady=(24, 20))
+        
+        accent_bar = ctk.CTkFrame(logo_frame, fg_color=ACCENT,
+            width=3, height=22, corner_radius=2)
+        accent_bar.pack(side="left", padx=(0, 10))
+        
+        # 1. Load the image safely
+        try:
+            logo_img = ctk.CTkImage(
+                light_image=Image.open(resource_path("turbostrap.png")),
+                dark_image=Image.open(resource_path("turbostrap.png")),
+                size=(20, 20) # Adjust these dimensions as needed
+            )
+        except Exception:
+            logo_img = None # Failsafe in case the image file is missing
+            
+        # 2. Display the Title with the Icon
+        # Using ctk.CTkLabel directly here to easily pass the image and compound arguments
+        title_label = ctk.CTkLabel(
+            logo_frame, 
+            text=" TurboStrap", # Space added before the text for breathing room
+            image=logo_img, 
+            compound="left", 
+            font=("Barlow SemiBold", 15), 
+            text_color=TEXT
+        )
+        title_label.pack(side="left")
 
+        # Divider
+        ctk.CTkFrame(self, fg_color=BORDER, height=1, corner_radius=0).pack(
+            fill="x", padx=18, pady=(0, 12))
+        nav_items = [
+            ("🚀", "LAUNCH",    "Launch"),
+            ("⚙️",  "SETTINGS", "Settings"),
+            ("🔧", "FFLAGS",    "Fast Flags"),
+            ("🛠",  "CUSTOM",    "Custom Flags"),
+            ("🎨", "THEME",     "Theme"),
+            ("📊", "LOGS",      "Logs"),
+            ("ℹ️",  "ABOUT",     "About"),
+        ]
         
-        
+        for icon, page, label in nav_items:
+            row = ctk.CTkFrame(self, fg_color="transparent", corner_radius=10, height=40)
+            row.pack(fill="x", padx=10, pady=2)
+            row.pack_propagate(False)
 
-        
-        
-        for text, page in [
-            ("🚀 LAUNCH",     "LAUNCH"),
-            ("⚙️  SETTINGS",  "SETTINGS"),
-            ("🔧 FAST FLAGS", "FFLAGS"),
-            ("🛠  CUSTOM FLAGS", "CUSTOM"),
-            ("🎨 THEME",      "THEME"),
-            ("📊 LOGS",       "LOGS"),
-            ("ℹ️  ABOUT",     "ABOUT"),
-        ]:
-            ctk.CTkButton(self, text=text, command=lambda p=page: nav_cb(p),
-                font=("Barlow SemiBold", 13), fg_color="transparent",
-                hover_color=BORDER, anchor="w", height=40).pack(fill="x", padx=10, pady=2)
+            indicator = ctk.CTkFrame(row, fg_color="transparent",
+                width=3, corner_radius=2)
+            indicator.pack(side="left", fill="y", padx=(4, 0))
 
+            b = ctk.CTkButton(
+                row, text=f"  {icon}  {label}",
+                command=lambda p=page: nav_cb(p),
+                font=("Barlow SemiBold", 13),
+                fg_color="transparent",
+                hover_color=CARD_BG2,
+                text_color=MUTED,
+                anchor="w",
+                height=36,
+                corner_radius=8,
+            )
+            b.pack(side="left", fill="both", expand=True, padx=(2, 4))
+            self._buttons[page] = (row, b, indicator)
+
+    def set_active(self, page):
+        if self._active == page:
+            return
+        # Reset previous
+        if self._active and self._active in self._buttons:
+            row, b, ind = self._buttons[self._active]
+            row.configure(fg_color="transparent")
+            b.configure(text_color=MUTED, fg_color="transparent")
+            ind.configure(fg_color="transparent")
+        # Set new active
+        self._active = page
+        if page in self._buttons:
+            row, b, ind = self._buttons[page]
+            row.configure(fg_color=CARD_BG2)
+            b.configure(text_color=TEXT, fg_color="transparent")
+            ind.configure(fg_color=ACCENT)
+            
+    def update_username(self):
+        """Call this whenever you save a new username to update the sidebar live."""
+        self.username_label.configure(text=get_saved_username())
 
 class FFlagsPage(ctk.CTkFrame):
     def __init__(self, parent, cfg):
@@ -1315,26 +1630,25 @@ class FFlagsPage(ctk.CTkFrame):
         self.settings = load_fflags()
         self._active_tab = list(FFLAG_CATEGORIES.keys())[0]
 
-    
-        header = ctk.CTkFrame(self, fg_color=CARD_BG, corner_radius=0,
-            border_width=1, border_color=BORDER)
+        header = glass_card(self, corner_radius=0, border_width=0,
+            fg_color=GLASS_SIDEBAR)
         header.pack(fill="x")
         inner = ctk.CTkFrame(header, fg_color="transparent")
         inner.pack(fill="x", padx=24, pady=14)
         lbl(inner, "FAST FLAGS ", font=("Bebas Neue", 28), color=TEXT).pack(side="left")
         lbl(inner, "CONFIGURATION", font=("Bebas Neue", 28), color=ACCENT).pack(side="left")
         btn(inner, "💾 Save & Apply", self._save,
-            width=140, fg_color=ACCENT, hover_color=_darken(ACCENT)).pack(side="right", padx=(8, 0))
+            width=140, fg_color=ACCENT, hover_color=_darken(ACCENT),
+            corner_radius=10).pack(side="right", padx=(8, 0))
         btn(inner, "🔄 Reset All", self._reset,
-            width=120, fg_color="#2a2a2a", hover_color="#333").pack(side="right")
+            width=120, fg_color=CARD_BG2, hover_color=BORDER2,
+            border_color=BORDER, corner_radius=10).pack(side="right")
 
-       
-        tab_bar = ctk.CTkFrame(self, fg_color=BG, corner_radius=0,
-            border_width=0)
+        tab_bar = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
         tab_bar.pack(fill="x")
 
-        
-        pill_bg = ctk.CTkFrame(tab_bar, fg_color="#000000", corner_radius=8)
+        pill_bg = ctk.CTkFrame(tab_bar, fg_color=PILL_BG, corner_radius=10,
+            border_width=1, border_color=BORDER)
         pill_bg.pack(fill="x", padx=20, pady=10)
 
         self._tab_buttons = {}
@@ -1355,7 +1669,6 @@ class FFlagsPage(ctk.CTkFrame):
             tb.pack(side="left", expand=True, fill="x", padx=4, pady=4)
             self._tab_buttons[cat] = tb
 
-       
         self._content_area = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
         self._content_area.pack(fill="both", expand=True, padx=0, pady=0)
 
@@ -1378,14 +1691,13 @@ class FFlagsPage(ctk.CTkFrame):
             is_active = cat == name
             tb.configure(
                 fg_color=ACCENT if is_active else "transparent",
-                hover_color=_darken(ACCENT) if is_active else "#1e1e1e",
+                hover_color=_darken(ACCENT) if is_active else CARD_BG2,
                 text_color=TEXT if is_active else MUTED,
             )
 
     def _render_setting(self, parent, category, key, data):
         full_key = f"{category}.{key}"
-        container = ctk.CTkFrame(parent, fg_color=CARD_BG, corner_radius=8,
-            border_width=1, border_color=BORDER)
+        container = glass_card(parent)
         container.pack(fill="x", pady=6, padx=4)
         header_row = ctk.CTkFrame(container, fg_color="transparent")
         header_row.pack(fill="x", padx=15, pady=(12, 4))
@@ -1473,7 +1785,6 @@ class CustomFlagsPage(ctk.CTkFrame):
         self._flags = self._load()
         self._selected = set()
 
-       
         header = ctk.CTkFrame(self, fg_color=CARD_BG, corner_radius=0,
             border_width=1, border_color=BORDER)
         header.pack(fill="x")
@@ -1482,7 +1793,6 @@ class CustomFlagsPage(ctk.CTkFrame):
         lbl(inner, "CUSTOM ", font=("Bebas Neue", 28), color=TEXT).pack(side="left")
         lbl(inner, "FLAGS", font=("Bebas Neue", 28), color=ACCENT).pack(side="left")
 
-        
         toolbar = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
         toolbar.pack(fill="x", padx=16, pady=(10, 0))
 
@@ -1497,12 +1807,10 @@ class CustomFlagsPage(ctk.CTkFrame):
         btn(toolbar, "📤  Export JSON", self._export_json,
             width=120, fg_color="#2a2a2a", hover_color="#333").pack(side="left")
 
-  
         self._count_lbl = lbl(toolbar, f"Total Flags: {len(self._flags)}",
             font=("Barlow", 11), color=MUTED)
         self._count_lbl.pack(side="right", padx=10)
 
-       
         search_frame = ctk.CTkFrame(self, fg_color=CARD_BG, corner_radius=6,
             border_width=1, border_color=BORDER)
         search_frame.pack(fill="x", padx=16, pady=10)
@@ -1513,7 +1821,6 @@ class CustomFlagsPage(ctk.CTkFrame):
             fg_color="transparent", border_width=0,
             font=("Barlow", 12), height=36).pack(fill="x", padx=10)
 
-   
         col_header = ctk.CTkFrame(self, fg_color=BORDER, corner_radius=0)
         col_header.pack(fill="x", padx=16)
         ctk.CTkLabel(col_header, text="", width=30).pack(side="left", padx=(8, 0))
@@ -1524,12 +1831,10 @@ class CustomFlagsPage(ctk.CTkFrame):
         ctk.CTkLabel(col_header, text="Actions", font=("Barlow SemiBold", 12),
             text_color=MUTED, width=80).pack(side="right", padx=8)
 
-        
         self._list_frame = ctk.CTkScrollableFrame(self, fg_color="transparent",
             corner_radius=0)
         self._list_frame.pack(fill="both", expand=True, padx=16, pady=(0, 0))
 
-      
         apply_bar = ctk.CTkFrame(self, fg_color=CARD_BG, corner_radius=0,
             border_width=1, border_color=BORDER)
         apply_bar.pack(fill="x")
@@ -1542,7 +1847,6 @@ class CustomFlagsPage(ctk.CTkFrame):
         self._refresh_list()
 
     def _load(self):
-       
         path = Path(os.getenv("APPDATA")) / "TurboStrap" / "custom_flags.json"
         custom = {}
         if path.exists():
@@ -1551,16 +1855,11 @@ class CustomFlagsPage(ctk.CTkFrame):
                     custom = json.load(f)
             except Exception:
                 pass
-    
-       
         preset = load_raw_fflags()
         merged = {**preset, **custom} 
         return merged
         
-        
-        
     def _save(self):
-      
         preset_keys = set(load_raw_fflags().keys())
         custom_only = {k: v for k, v in self._flags.items() if k not in preset_keys}
         path = Path(os.getenv("APPDATA")) / "TurboStrap" / "custom_flags.json"
@@ -1587,7 +1886,6 @@ class CustomFlagsPage(ctk.CTkFrame):
                 border_width=1, border_color=BORDER)
             row.pack(fill="x", pady=3)
 
-            
             var = ctk.BooleanVar(value=flag_name in self._selected)
             def _on_check(v=var, n=flag_name):
                 if v.get():
@@ -1599,21 +1897,18 @@ class CustomFlagsPage(ctk.CTkFrame):
                 fg_color=ACCENT, hover_color=_darken(ACCENT),
                 border_color=BORDER).pack(side="left", padx=(10, 0), pady=10)
 
-            
             name_var = ctk.StringVar(value=flag_name)
             name_entry = ctk.CTkEntry(row, textvariable=name_var,
                 fg_color="transparent", border_width=0,
                 font=("Consolas", 12), text_color=TEXT)
             name_entry.pack(side="left", fill="x", expand=True, padx=8, pady=6)
 
-         
             val_var = ctk.StringVar(value=str(flag_value))
             val_entry = ctk.CTkEntry(row, textvariable=val_var,
                 fg_color="transparent", border_width=0,
                 font=("Consolas", 12), text_color=ACCENT, width=160)
             val_entry.pack(side="left", padx=8, pady=6)
 
-           
             def _on_edit(event, old=flag_name, nv=name_var, vv=val_var):
                 new_name = nv.get().strip()
                 new_val  = vv.get().strip()
@@ -1628,7 +1923,6 @@ class CustomFlagsPage(ctk.CTkFrame):
             name_entry.bind("<Return>", _on_edit)
             val_entry.bind("<Return>", _on_edit)
 
-           
             btn(row, "✕", lambda n=flag_name: self._delete_one(n),
                 width=36, height=28, fg_color="#333", hover_color="#c41213",
                 font=("Barlow", 11)).pack(side="right", padx=8, pady=6)
@@ -1736,7 +2030,6 @@ class CustomFlagsPage(ctk.CTkFrame):
 
     def _save_and_apply(self):
         self._save()
-       
         merged = load_raw_fflags()
         merged.update(self._flags)
         success = apply_fflags_to_roblox(merged)
@@ -1747,6 +2040,7 @@ class CustomFlagsPage(ctk.CTkFrame):
         else:
             messagebox.showwarning("TurboStrap",
                 "⚠ Saved but couldn't find Roblox install to write ClientAppSettings.")
+
 def show_splash(master, accent, version):
     import tkinter as tk
     W, H = 520, 280
@@ -1789,10 +2083,8 @@ def show_splash(master, accent, version):
         canvas.create_rectangle(bx-size//2, by-size//2, bx+size//2, by+size//2, outline=accent, width=2)
         canvas.create_text(bx, by, text="CE", font=("Bebas Neue", 32), fill=accent)
     
-    
-    
     canvas.create_text(W//2, H//2+30, text="TurboStrap", font=("Bebas Neue", 34), fill="#f5f5f5")
-    canvas.create_text(W//2, H//2+58, text="Roblox Launcher", font=("Barlow", 12), fill="#a0a0a0")
+    canvas.create_text(W//2, H//2+58, text="Roblox Bootstrapper", font=("Barlow", 12), fill="#a0a0a0")
     canvas.create_text(W//2, H//2+78, text=f"v{version}", font=("Barlow Condensed", 11), fill="#777777")
     status_text = canvas.create_text(W//2, H-20, text="Checking for updates…",
         font=("Barlow", 9), fill="#dddddd")
@@ -1810,19 +2102,18 @@ def show_splash(master, accent, version):
     threading.Thread(target=_do_version_check, daemon=True).start()
     return splash
 
-
-    
 class TurboStrap(ctk.CTk):
     def __init__(self):
         init_app_icon()
         super().__init__()
         self.cfg = load_config()
-        self.tray_icon   = None
-        self.roblox_proc = None
+        self.tray_icon    = None
+        self.roblox_proc  = None
+        self._session_start = None
 
-        self.title("TurboStrap")
-        self.geometry("960x620")
-        self.minsize(860, 560)
+        self.title("TurboStrap - Roblox Bootstrapper")
+        self.geometry("860x760")
+        self.minsize(860, 760)
         self.configure(fg_color=BG)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         global ACCENT
@@ -1842,7 +2133,7 @@ class TurboStrap(ctk.CTk):
             pass
         self.splash = None
         self.update_idletasks()
-        w, h = 960, 620
+        w, h = 960, 760
         x = (self.winfo_screenwidth() - w) // 2
         y = (self.winfo_screenheight() - h) // 2
         self.geometry(f"{w}x{h}+{x}+{y}")
@@ -1869,9 +2160,7 @@ class TurboStrap(ctk.CTk):
             f"Would you like to download the latest version?"
         )
         if result:
-            webbrowser.open("https://github.com/turbostrap/Turbostrap-Launcher/releases")
-
-   
+            webbrowser.open("https://github.com/naklirajveerfr/Turbostrap-Launcher/releases")
 
     def _build(self):
         self.content = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
@@ -1886,10 +2175,10 @@ class TurboStrap(ctk.CTk):
         }
         self.sidebar = Sidebar(self, self._nav)
         self.sidebar.pack(side="left", fill="y")
-        self.divider = ctk.CTkFrame(self, width=1, fg_color="#1a1a1a", corner_radius=0)
+        self.divider = ctk.CTkFrame(self, width=1, fg_color=BORDER, corner_radius=0)
         self.divider.pack(side="left", fill="y")
         self.content.pack(side="left", fill="both", expand=True)
-        self._show("LAUNCH")
+        self._nav("LAUNCH")
 
     def _show(self, name):
         for p in self.pages.values():
@@ -1898,9 +2187,11 @@ class TurboStrap(ctk.CTk):
 
     def _nav(self, name):
         self._show(name)
+        self.sidebar.set_active(name)
 
     def _refresh(self):
         self.pages["LAUNCH"].refresh()
+        
     def _rebuild(self):
         global ACCENT
         ACCENT = self.cfg.get("accent_color", ACCENT)
@@ -1911,18 +2202,56 @@ class TurboStrap(ctk.CTk):
         self.divider.destroy()
         self._build()
         self._show("THEME")
+        
     def go_to_tray(self, roblox_proc):
         self.roblox_proc = roblox_proc
+        self._session_start = time.time()
+        if self.cfg.get("discord_rpc", True):
+            _discord_rpc.start()
         self.withdraw()
         self._create_tray_icon()
-        threading.Thread(target=self._wait_for_roblox_exit, daemon=True).start()
+        threading.Thread(
+            target=self._wait_for_roblox_exit,
+            args=(self._session_start, self.cfg.get("close_on_launch", False)),
+            daemon=True
+        ).start()
 
-    def _wait_for_roblox_exit(self):
+    def _wait_for_roblox_exit(self, session_start, close_on_launch):
         try:
             self.roblox_proc.wait()
+            exit_code = self.roblox_proc.returncode
         except Exception:
-            pass
-        self.after(0, self._restore_from_tray)
+            exit_code = 0
+
+        _discord_rpc.stop()
+
+        session_seconds = time.time() - session_start
+        pt = load_playtime()
+        pt["total_seconds"] = pt.get("total_seconds", 0) + session_seconds
+        save_playtime(pt)
+
+        if close_on_launch:
+            self.after(0, self.destroy)
+            return
+
+        if exit_code not in (0, None):
+            self.after(0, self._show_crash_dialog)
+        else:
+            self.after(0, self._restore_from_tray)
+
+    def _show_crash_dialog(self):
+        """Show a popup when Roblox crashes with option to relaunch."""
+        self._restore_from_tray()
+        answer = messagebox.askyesno(
+            "TurboStrap — Roblox Crashed",
+            "Roblox has crashed unexpectedly.\n\nWould you like to relaunch?",
+            icon="warning"
+        )
+        if answer:
+            try:
+                self.pages["LAUNCH"].launch_btn.invoke()
+            except Exception:
+                pass
 
     def _create_tray_icon(self):
         if self.tray_icon is not None:
@@ -1939,13 +2268,22 @@ class TurboStrap(ctk.CTk):
         threading.Thread(target=self.tray_icon.run, daemon=True).start()
 
     def _restore_from_tray(self):
+        _discord_rpc.stop()
+        try:
+            self.pages["LAUNCH"].refresh_playtime()
+        except Exception:
+            pass
         if self.tray_icon:
             try:
                 self.tray_icon.stop()
             except Exception:
                 pass
             self.tray_icon = None
+        self.after(100, self._do_restore)
+
+    def _do_restore(self):
         self.deiconify()
+        self.lift()
         self.focus_force()
         try:
             self.pages["LAUNCH"].launch_btn.configure(state="normal", text="▶  LAUNCH ROBLOX")
@@ -1953,8 +2291,10 @@ class TurboStrap(ctk.CTk):
             pass
 
     def _exit_from_tray(self):
+        _discord_rpc.stop()
         if self.tray_icon:
             try:
+                self.tray_icon.visible = False
                 self.tray_icon.stop()
             except Exception:
                 pass
@@ -1965,8 +2305,8 @@ class TurboStrap(ctk.CTk):
         if self.roblox_proc and self.roblox_proc.poll() is None:
             self.go_to_tray(self.roblox_proc)
         else:
+            _discord_rpc.stop()
             self.destroy()
-
 
 if __name__ == "__main__":
     app = TurboStrap()
